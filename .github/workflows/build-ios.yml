@@ -1,0 +1,87 @@
+name: Build Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Python Pillow & ldid
+        run: |
+          pip3 install --break-system-packages Pillow || pip3 install Pillow
+          brew install ldid || true
+
+      - name: Download Modded MiiChan.pck from Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download v1.0.5-assets -p "MiiChan.pck"
+          ls -lh MiiChan.pck
+
+      - name: Fetch Spine 4.2 + Godot 4.5.1 iOS Export Template
+        run: |
+          echo "Downloading ios.zip via HTTP byte-range from spine-godot S3..."
+          curl -fSL -r 65-315117101 "https://spine-godot.s3.amazonaws.com/4.2/4.5.1-stable/spine-godot-templates-4.2-4.5.1-stable.tpz" -o ios.zip
+          unzip -t ios.zip >/dev/null
+          ls -lh ios.zip
+
+      - name: Generate Xcode Project
+        run: |
+          python3 generate_xcode_project.py ios.zip MiiChan.pck app_icon.webp build_xcode
+          ls -la build_xcode
+          ls -la build_xcode/MiiChan
+
+      - name: Build Unsigned .app with xcodebuild
+        run: |
+          xcodebuild \
+            -project build_xcode/MiiChan.xcodeproj \
+            -target MiiChan \
+            -configuration Release \
+            -sdk iphoneos \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            SYMROOT="$PWD/build_out" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            PROVISIONING_PROFILE="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Pseudo-sign and Package Unsigned IPA
+        run: |
+          APP_PATH="$PWD/build_out/Release-iphoneos/MiiChan.app"
+          ls -la "$APP_PATH"
+          if command -v ldid >/dev/null 2>&1; then
+            find "$APP_PATH" -name "*.dylib" -exec ldid -S {} \; || true
+            find "$APP_PATH/Frameworks" -name "*.framework" -exec ldid -S {} \; 2>/dev/null || true
+            ldid -S "$APP_PATH/MiiChan"
+          else
+            codesign --force --deep --sign - --timestamp=none "$APP_PATH"
+          fi
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/MiiChan.app
+          zip -qry MiiChan_1.0.5_Modded_Unsigned.ipa Payload
+          ls -lh MiiChan_1.0.5_Modded_Unsigned.ipa
+
+      - name: Upload IPA to GitHub Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiiChan_1.0.5_Modded_Unsigned_IPA
+          path: MiiChan_1.0.5_Modded_Unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload IPA to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload v1.0.5-assets MiiChan_1.0.5_Modded_Unsigned.ipa --clobber
